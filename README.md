@@ -2,6 +2,16 @@
 
 TypeScript library for the M-Pesa STK Push lifecycle. Handles the parts the Daraja API leaves to you: idempotent initiation, atomic callback deduplication, polling fallback, and reconciliation.
 
+**New in this version:** a built-in webhook relay server. Point your Safaricom `CallbackURL` at the relay, and it handles guaranteed delivery with exponential-backoff retries to your app — just like Stripe webhooks, but for Daraja.
+
+---
+
+## The problem
+
+Safaricom fires your `CallbackURL` once. If your server is restarting, behind a CDN that rate-limits their IP, or just slow to respond — the callback is silently dropped. No retry, no dead-letter queue, no notification. You find out from a customer who says "I paid but nothing happened."
+
+The polling fallback in `MpesaStk` catches a lot of that. But polling only works if your server is up. The relay catches what polling can't: the gap between when the callback was sent and when your server came back online.
+
 ---
 
 ## Installation
@@ -14,7 +24,7 @@ Node.js 18+ required (uses native `fetch`).
 
 ---
 
-## Quick Start
+## Quick Start — Library Mode
 
 ```typescript
 import { MpesaStk, PostgresAdapter } from 'mpesa-stk'
@@ -63,6 +73,141 @@ const reconciliation = await mpesa.reconcile(
 
 ---
 
+## Relay Server Mode
+
+Instead of pointing Safaricom's `CallbackURL` directly at your app, you point it at the relay. The relay validates the callback, deduplicates it, persists it, and then delivers it to your app with exponential-backoff retries. Your app gets the same signed webhook regardless of whether Safaricom fired once or four times.
+
+```
+Safaricom → relay /hooks/<appId> → your app POST /mpesa/callback
+                       ↑
+              (retries with backoff if your app is down)
+```
+
+### Run with Docker / standalone
+
+```bash
+DATABASE_URL=postgres://user:pass@host/db PORT=3000 npx mpesa-stk-relay
+```
+
+On first run it creates the `relay_apps` and `relay_delivery_events` tables automatically.
+
+### Register your app
+
+```bash
+curl -X POST https://your-relay-domain.com/apps \
+  -H 'Content-Type: application/json' \
+  -d '{ "targetUrl": "https://yourapp.com/mpesa/callback" }'
+```
+
+Response:
+
+```json
+{
+  "appId": "3f4a1c2d-...",
+  "signingSecret": "a3f9b2c1...",
+  "hookUrl": "/hooks/3f4a1c2d-...",
+  "createdAt": "2026-04-03T10:00:00.000Z"
+}
+```
+
+Store `signingSecret` somewhere safe — it's shown once. This is what you use to verify incoming webhooks and to update your target URL later.
+
+Set your Safaricom `CallbackURL` to:
+
+```
+https://your-relay-domain.com/hooks/3f4a1c2d-...
+```
+
+### Verify webhook signatures in your app
+
+Every delivery attempt includes an `X-Mpesa-Signature` header. Verify it before trusting the payload:
+
+```typescript
+import { verifySignature } from 'mpesa-stk/server'
+
+app.post('/mpesa/callback', (req, res) => {
+  const body = JSON.stringify(req.body) // or the raw body string
+  const sig  = req.headers['x-mpesa-signature'] as string
+
+  if (!verifySignature(body, process.env.MPESA_RELAY_SECRET!, sig)) {
+    return res.status(401).end()
+  }
+
+  res.json({ ResultCode: 0, ResultDesc: 'Success' })
+  // process the callback...
+})
+```
+
+Safaricom does not sign its callbacks. The relay does. If you skip verification, anyone who discovers your callback URL can POST fake success payloads.
+
+### Update your target URL
+
+```bash
+curl -X PATCH https://your-relay-domain.com/apps/3f4a1c2d-... \
+  -H 'Authorization: Bearer <signingSecret>' \
+  -H 'Content-Type: application/json' \
+  -d '{ "targetUrl": "https://newapp.com/mpesa/callback" }'
+```
+
+### Check delivery status
+
+```bash
+curl 'https://your-relay-domain.com/status/ws_CO_050420261030...?app_id=3f4a1c2d-...'
+```
+
+Response:
+
+```json
+{
+  "eventId": "...",
+  "checkoutRequestId": "ws_CO_050420261030...",
+  "status": "DELIVERED",
+  "attemptCount": 2,
+  "deliveredAt": "2026-04-03T10:01:35.000Z",
+  "lastError": null
+}
+```
+
+Possible `status` values: `PENDING`, `DELIVERED`, `FAILED`, `DEAD`.  
+`DEAD` means the relay exhausted all 6 attempts — check `lastError` to see what your app was returning.
+
+### Retry schedule
+
+| Attempt | Delay after previous failure |
+|---------|------------------------------|
+| 1       | Immediate                    |
+| 2       | 30 seconds                   |
+| 3       | 2 minutes                    |
+| 4       | 10 minutes                   |
+| 5       | 30 minutes                   |
+| 6       | 2 hours                      |
+| —       | Dead-lettered                |
+
+### Embed the relay in your own server
+
+If you'd rather run the relay as part of an existing Node.js app instead of standalone:
+
+```typescript
+import { createRelayServer, PostgresRelayAdapter, recoverPendingDeliveries } from 'mpesa-stk/server'
+import { serve } from '@hono/node-server'
+import { Pool } from 'pg'
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const storage = new PostgresRelayAdapter(pool)
+
+await storage.migrate()
+await recoverPendingDeliveries(storage) // reschedule any in-flight retries
+
+const relay = createRelayServer({ storage })
+
+// Mount on any path you control
+serve({ fetch: relay.fetch, port: 3000 })
+```
+
+The `createRelayServer()` function returns a [Hono](https://hono.dev/) app — you can mount it inside Express, serve it on Cloudflare Workers, or wrap it in Bun.
+
+---
+
 ## Environment Variables
 
 | Variable | Description |
@@ -71,14 +216,18 @@ const reconciliation = await mpesa.reconcile(
 | `MPESA_CONSUMER_SECRET` | Daraja app consumer secret |
 | `MPESA_SHORTCODE` | Your M-Pesa shortcode (paybill or till number) |
 | `MPESA_PASSKEY` | STK Push passkey from the Daraja portal |
-| `MPESA_CALLBACK_URL` | Publicly reachable HTTPS URL that receives STK callbacks |
+| `MPESA_CALLBACK_URL` | Set this to your relay's `/hooks/<appId>` URL |
 | `MPESA_ENVIRONMENT` | `sandbox` or `production` |
+| `DATABASE_URL` | PostgreSQL connection string (relay server only) |
+| `PORT` | Port for the relay server (default: 3000) |
 
-The library does not read environment variables directly. Pass values via `MpesaConfig`.
+The library itself does not read environment variables. Pass values explicitly.
 
 ---
 
 ## Database Setup
+
+### Library tables (mpesa_payments)
 
 Run this once before starting your server:
 
@@ -107,6 +256,10 @@ CREATE INDEX IF NOT EXISTS mpesa_payments_status_initiated
 
 Or call `await adapter.migrate()` on startup — it uses `IF NOT EXISTS` and is safe to call repeatedly.
 
+### Relay tables (relay_apps, relay_delivery_events)
+
+Created automatically when you run `await storage.migrate()` or start `npx mpesa-stk-relay`.
+
 ---
 
 ## Configuration
@@ -119,7 +272,7 @@ All fields in `MpesaConfig`:
 | `consumerSecret` | `string` | — | Daraja consumer secret |
 | `shortCode` | `string` | — | Your M-Pesa shortcode |
 | `passKey` | `string` | — | STK Push passkey |
-| `callbackUrl` | `string` | — | Your callback endpoint |
+| `callbackUrl` | `string` | — | Your callback endpoint (or relay hook URL) |
 | `environment` | `'sandbox' \| 'production'` | — | Controls which Daraja URLs are used |
 | `timeoutMs` | `number` | `75000` | HTTP timeout for all Daraja requests |
 | `maxPollAttempts` | `number` | `10` | How many STK Query attempts before marking TIMEOUT |
@@ -171,7 +324,7 @@ The Daraja API gives you a way to send an STK Push and receive a callback. It le
 - How to detect when your database says `SUCCESS` but Safaricom has no record of it
 - How to handle the phone number being masked in callbacks from 2026 onward
 
-This library handles those. It does not handle B2C, C2B registration, balance queries, reversals, or any Daraja endpoint other than STK Push initiation and STK Push query.
+This library handles those. The relay server handles the delivery reliability layer on top of that. Neither handles B2C, C2B registration, balance queries, reversals, or any Daraja endpoint other than STK Push.
 
 ---
 
