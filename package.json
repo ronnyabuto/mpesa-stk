@@ -5,6 +5,9 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "mpesa-stk-relay": "./dist/bin/serve.js"
+  },
   "exports": {
     ".": {
       "import": {
@@ -35,6 +38,16 @@
         "types": "./dist/adapters/postgres.d.ts",
         "default": "./dist/adapters/postgres.js"
       }
+    },
+    "./server": {
+      "import": {
+        "types": "./dist/server/index.d.mts",
+        "default": "./dist/server/index.mjs"
+      },
+      "require": {
+        "types": "./dist/server/index.d.ts",
+        "default": "./dist/server/index.js"
+      }
     }
   },
   "files": [
@@ -50,6 +63,8 @@
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.12",
+    "hono": "^4.12.10",
     "pg": "^8.11.0"
   },
   "devDependencies": {
@@ -74,6 +89,9 @@
     "safaricom",
     "payments",
     "kenya",
-    "typescript"
+    "typescript",
+    "webhook",
+    "webhook-relay",
+    "callback"
   ]
 }
