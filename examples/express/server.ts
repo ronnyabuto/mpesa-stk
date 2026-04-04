@@ -144,11 +144,6 @@ app.post('/mpesa/reconcile', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 const PORT = process.env['PORT'] ?? 3000
-
-// Run migrations before accepting traffic. Safe to call on every startup —
-// all DDL uses IF NOT EXISTS so it's a no-op after the first run.
-await adapter.migrate()
-
 app.listen(PORT, () => {
   console.log(`[mpesa] Express server running on port ${PORT}`)
 })
