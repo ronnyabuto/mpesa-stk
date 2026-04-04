@@ -31,6 +31,12 @@ import { MpesaStk, PostgresAdapter } from 'mpesa-stk'
 import { Pool } from 'pg'
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const adapter = new PostgresAdapter(pool)
+
+// Creates the mpesa_payments table if it doesn't exist. Safe to call on
+// every startup — all DDL uses IF NOT EXISTS.
+await adapter.migrate()
+
 const mpesa = new MpesaStk(
   {
     consumerKey:    process.env.MPESA_CONSUMER_KEY!,
@@ -40,7 +46,7 @@ const mpesa = new MpesaStk(
     callbackUrl:    process.env.MPESA_CALLBACK_URL!,
     environment:    'sandbox',
   },
-  new PostgresAdapter(pool)
+  adapter
 )
 
 // Fires when a payment reaches a terminal state — via callback or polling
