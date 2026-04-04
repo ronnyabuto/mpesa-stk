@@ -6,7 +6,7 @@
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "bin": {
-    "mpesa-stk-relay": "./dist/bin/serve.js"
+    "mpesa-stk-relay": "dist/bin/serve.js"
   },
   "exports": {
     ".": {
@@ -80,7 +80,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ronnyabuto/mpesa-stk"
+    "url": "git+https://github.com/ronnyabuto/mpesa-stk.git"
   },
   "keywords": [
     "mpesa",
