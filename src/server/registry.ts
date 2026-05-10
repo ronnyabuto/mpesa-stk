@@ -146,6 +146,15 @@ export class PostgresRelayAdapter implements RelayStorage {
     return { inserted: false, event: existing }
   }
 
+  async getEvent(id: string): Promise<DeliveryEvent | null> {
+    const result = await this.pool.query<EventRow>(
+      'SELECT * FROM relay_delivery_events WHERE id = $1 LIMIT 1',
+      [id]
+    )
+    const row = result.rows[0]
+    return row ? rowToEvent(row) : null
+  }
+
   async updateEvent(
     id: string,
     updates: Partial<Pick<DeliveryEvent, 'status' | 'attemptCount' | 'nextAttemptAt' | 'lastError' | 'deliveredAt'>>

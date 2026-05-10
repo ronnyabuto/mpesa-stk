@@ -17,13 +17,16 @@ export class MemoryAdapter implements StorageAdapter {
   // Secondary index: idempotencyKey → paymentId
   private readonly byIdempotencyKey = new Map<string, string>()
 
-  async createPayment(record: PaymentRecord): Promise<void> {
+  async createPayment(record: PaymentRecord, idempotencyKey?: string): Promise<void> {
     if (this.payments.has(record.id)) {
       throw new Error(`Payment with id "${record.id}" already exists`)
     }
     // Deep-clone so external mutations don't affect stored state
     this.payments.set(record.id, structuredClone(record))
     this.byCheckoutId.set(record.checkoutRequestId, record.id)
+    if (idempotencyKey) {
+      this.byIdempotencyKey.set(idempotencyKey, record.id)
+    }
   }
 
   async getPayment(id: string): Promise<PaymentRecord | null> {
@@ -85,14 +88,15 @@ export class MemoryAdapter implements StorageAdapter {
   }
 
   async getPaymentsByStatusAndDateRange(
-    status: PaymentStatus,
+    statuses: PaymentStatus[],
     from: Date,
     to: Date
   ): Promise<PaymentRecord[]> {
+    const statusSet = new Set(statuses)
     const results: PaymentRecord[] = []
     for (const record of this.payments.values()) {
       if (
-        record.status === status &&
+        statusSet.has(record.status) &&
         record.initiatedAt >= from &&
         record.initiatedAt <= to
       ) {

@@ -135,11 +135,11 @@ async function runDelivery(
   storage: RelayStorage,
   logger?: Logger
 ): Promise<void> {
-  const event = await storage.getDueEvents().then((events) =>
-    events.find((e) => e.id === eventId)
-  )
+  const event = await storage.getEvent(eventId)
 
-  if (!event) return // Already delivered or dead-lettered by another process
+  // Not due (already delivered/dead-lettered), or nextAttemptAt is in the future
+  if (!event || (event.status !== 'PENDING' && event.status !== 'FAILED')) return
+  if (event.nextAttemptAt && event.nextAttemptAt > new Date()) return
 
   const app = await storage.getApp(event.appId)
   if (!app) {

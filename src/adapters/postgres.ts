@@ -83,6 +83,44 @@ function rowToRecord(row: PaymentRow): PaymentRecord {
 }
 
 // ---------------------------------------------------------------------------
+// SET clause builder
+// ---------------------------------------------------------------------------
+
+const PAYMENT_COLUMN_MAP: Partial<Record<keyof PaymentRecord, string>> = {
+  status: 'status',
+  mpesaReceiptNumber: 'mpesa_receipt_number',
+  failureReason: 'failure_reason',
+  resultCode: 'result_code',
+  completedAt: 'completed_at',
+  rawCallback: 'raw_callback',
+  merchantRequestId: 'merchant_request_id',
+  phoneNumber: 'phone_number',
+  amount: 'amount',
+  accountReference: 'account_reference',
+}
+
+function buildSetClause(
+  updates: Partial<PaymentRecord>,
+  allowedKeys: ReadonlyArray<keyof PaymentRecord> = Object.keys(PAYMENT_COLUMN_MAP) as Array<keyof PaymentRecord>
+): { setClauses: string[]; values: unknown[] } {
+  const setClauses: string[] = []
+  const values: unknown[] = []
+  let paramIdx = 1
+
+  for (const key of allowedKeys) {
+    if (!(key in updates)) continue
+    const column = PAYMENT_COLUMN_MAP[key]
+    if (!column) continue
+    const value = updates[key]
+    setClauses.push(`${column} = $${paramIdx}`)
+    values.push(key === 'rawCallback' && value !== undefined ? JSON.stringify(value) : (value ?? null))
+    paramIdx++
+  }
+
+  return { setClauses, values }
+}
+
+// ---------------------------------------------------------------------------
 // PostgresAdapter
 // ---------------------------------------------------------------------------
 
@@ -94,7 +132,7 @@ export class PostgresAdapter implements StorageAdapter {
    */
   constructor(private readonly pool: Pool) {}
 
-  async createPayment(record: PaymentRecord): Promise<void> {
+  async createPayment(record: PaymentRecord, idempotencyKey?: string): Promise<void> {
     await this.pool.query<PaymentRow>(
       `INSERT INTO mpesa_payments (
          id, checkout_request_id, merchant_request_id,
@@ -116,7 +154,7 @@ export class PostgresAdapter implements StorageAdapter {
         record.initiatedAt,
         record.completedAt ?? null,
         record.rawCallback !== undefined ? JSON.stringify(record.rawCallback) : null,
-        null, // idempotency_key set separately via registerIdempotencyKey
+        idempotencyKey ?? null,
       ]
     )
   }
@@ -149,57 +187,25 @@ export class PostgresAdapter implements StorageAdapter {
   }
 
   async updatePayment(id: string, updates: Partial<PaymentRecord>): Promise<void> {
-    // Build the SET clause dynamically from the provided updates
-    const setClauses: string[] = []
-    const values: unknown[] = []
-    let paramIdx = 1
-
-    const columnMap: Partial<Record<keyof PaymentRecord, string>> = {
-      status: 'status',
-      mpesaReceiptNumber: 'mpesa_receipt_number',
-      failureReason: 'failure_reason',
-      resultCode: 'result_code',
-      completedAt: 'completed_at',
-      rawCallback: 'raw_callback',
-      merchantRequestId: 'merchant_request_id',
-      phoneNumber: 'phone_number',
-      amount: 'amount',
-      accountReference: 'account_reference',
-    }
-
-    for (const [key, column] of Object.entries(columnMap) as [keyof PaymentRecord, string][]) {
-      if (key in updates) {
-        const value = updates[key]
-        setClauses.push(`${column} = $${paramIdx}`)
-        // Serialize rawCallback as JSON string
-        if (key === 'rawCallback') {
-          values.push(value !== undefined ? JSON.stringify(value) : null)
-        } else {
-          values.push(value !== undefined ? value : null)
-        }
-        paramIdx++
-      }
-    }
-
+    const { setClauses, values } = buildSetClause(updates)
     if (setClauses.length === 0) return
-
     values.push(id)
     await this.pool.query(
-      `UPDATE mpesa_payments SET ${setClauses.join(', ')} WHERE id = $${paramIdx}`,
+      `UPDATE mpesa_payments SET ${setClauses.join(', ')} WHERE id = $${values.length}`,
       values
     )
   }
 
   async getPaymentsByStatusAndDateRange(
-    status: PaymentStatus,
+    statuses: PaymentStatus[],
     from: Date,
     to: Date
   ): Promise<PaymentRecord[]> {
     const result = await this.pool.query<PaymentRow>(
       `SELECT * FROM mpesa_payments
-       WHERE status = $1 AND initiated_at >= $2 AND initiated_at <= $3
+       WHERE status = ANY($1::text[]) AND initiated_at >= $2 AND initiated_at <= $3
        ORDER BY initiated_at ASC`,
-      [status, from, to]
+      [statuses, from, to]
     )
     return result.rows.map(rowToRecord)
   }
@@ -215,40 +221,16 @@ export class PostgresAdapter implements StorageAdapter {
    * callback 2–4 times in rapid succession under load.
    */
   async settlePayment(id: string, updates: Partial<PaymentRecord>): Promise<boolean> {
-    const setClauses: string[] = []
-    const values: unknown[] = []
-    let paramIdx = 1
-
-    const columnMap: Partial<Record<keyof PaymentRecord, string>> = {
-      status: 'status',
-      mpesaReceiptNumber: 'mpesa_receipt_number',
-      failureReason: 'failure_reason',
-      resultCode: 'result_code',
-      completedAt: 'completed_at',
-      rawCallback: 'raw_callback',
-    }
-
-    for (const [key, column] of Object.entries(columnMap) as [keyof PaymentRecord, string][]) {
-      if (key in updates) {
-        const value = updates[key]
-        setClauses.push(`${column} = $${paramIdx}`)
-        if (key === 'rawCallback') {
-          values.push(value !== undefined ? JSON.stringify(value) : null)
-        } else {
-          values.push(value !== undefined ? value : null)
-        }
-        paramIdx++
-      }
-    }
-
+    const settlementKeys: Array<keyof PaymentRecord> = [
+      'status', 'mpesaReceiptNumber', 'failureReason', 'resultCode', 'completedAt', 'rawCallback',
+    ]
+    const { setClauses, values } = buildSetClause(updates, settlementKeys)
     if (setClauses.length === 0) return false
-
     values.push(id)
     const result = await this.pool.query(
-      `UPDATE mpesa_payments SET ${setClauses.join(', ')} WHERE id = $${paramIdx} AND status = 'PENDING'`,
+      `UPDATE mpesa_payments SET ${setClauses.join(', ')} WHERE id = $${values.length} AND status = 'PENDING'`,
       values
     )
-
     return (result.rowCount ?? 0) > 0
   }
 

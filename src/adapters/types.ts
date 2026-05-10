@@ -1,8 +1,14 @@
 import type { PaymentRecord, PaymentStatus } from '../types.js'
 
 export interface StorageAdapter {
-  /** Create a new payment record in PENDING state */
-  createPayment(record: PaymentRecord): Promise<void>
+  /**
+   * Create a new payment record in PENDING state.
+   *
+   * If `idempotencyKey` is provided, it is registered atomically with the
+   * record in the same operation — eliminating the race window that exists
+   * when `createPayment` and `registerIdempotencyKey` are called separately.
+   */
+  createPayment(record: PaymentRecord, idempotencyKey?: string): Promise<void>
 
   /** Find by your internal ID */
   getPayment(id: string): Promise<PaymentRecord | null>
@@ -44,11 +50,15 @@ export interface StorageAdapter {
   registerIdempotencyKey(key: string, paymentId: string): Promise<void>
 
   /**
-   * For reconciliation: get all payments in a given status within a date range.
-   * `from` and `to` are compared against `initiatedAt`.
+   * For reconciliation: get all payments whose status is in `statuses` and whose
+   * `initiatedAt` falls within [from, to].
+   *
+   * Pass all statuses you want to verify in one call — implementations can
+   * translate this to a single `WHERE status = ANY(...)` query rather than
+   * issuing one query per status.
    */
   getPaymentsByStatusAndDateRange(
-    status: PaymentStatus,
+    statuses: PaymentStatus[],
     from: Date,
     to: Date
   ): Promise<PaymentRecord[]>

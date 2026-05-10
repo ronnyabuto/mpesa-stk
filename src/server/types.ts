@@ -36,6 +36,8 @@ export interface RelayStorage {
     event: Omit<DeliveryEvent, 'createdAt' | 'deliveredAt'>
   ): Promise<{ inserted: boolean; event: DeliveryEvent }>
 
+  getEvent(id: string): Promise<DeliveryEvent | null>
+
   updateEvent(
     id: string,
     updates: Partial<Pick<DeliveryEvent, 'status' | 'attemptCount' | 'nextAttemptAt' | 'lastError' | 'deliveredAt'>>

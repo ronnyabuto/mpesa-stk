@@ -1,8 +1,3 @@
-/**
- * Shared Daraja API helpers used by poll.ts and reconcile.ts.
- * Single definition to prevent the two modules diverging.
- */
-
 import type { MpesaConfig, DarajaQueryResponse } from './types.js'
 import { getEATTimestamp, generatePassword, getBaseUrl, fetchAccessToken, fetchWithTimeout } from './initiate.js'
 
@@ -35,7 +30,14 @@ export async function queryStkStatus(
     timeoutMs
   )
 
-  // Daraja returns 200 even for many error states; parse body regardless
+  // Daraja returns HTTP 200 for application-level errors (cancelled, wrong PIN, etc.)
+  // and the result code is in the body. Only check res.ok for infrastructure failures
+  // (401, 429, 503) whose bodies are not valid DarajaQueryResponse JSON.
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Daraja STK Query responded with HTTP ${res.status}${text ? `: ${text}` : ''}`)
+  }
+
   const data = await res.json() as DarajaQueryResponse
   return data
 }
