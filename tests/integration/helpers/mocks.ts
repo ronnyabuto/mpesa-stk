@@ -1,27 +1,4 @@
-/**
- * Mock factories for M-Pesa Daraja API responses.
- *
- * All shapes are based on the primary sources fetched during this session:
- *
- * STK Push initiation shapes:
- *   SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
- *   SOURCE: https://github.com/Bascil/mpesa-daraja-api-php/blob/master/docs/LipaNaMpesaOnline.md
- *
- * Callback shapes:
- *   SOURCE: https://mpesa-nextjs-docs.vercel.app/handling-callback
- *   SOURCE: https://github.com/Bascil/mpesa-daraja-api-php/blob/master/docs/LipaNaMpesaOnline.md
- *
- * STK Query shapes:
- *   SOURCE: https://dev.to/anne46/implementing-m-pesa-stk-push-and-query-in-ruby-on-rails-328d
- *
- * OAuth token shapes:
- *   SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
- *
- * ResultCode list:
- *   SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
- *   SOURCE: https://tuma.co.ke/common-mpesa-daraja-api-error-codes-explanation-and-mitigation/
- *   SOURCE: https://woodev.co.ke/common-m-pesa-api-errors/
- */
+import { vi } from 'vitest'
 
 // ---------------------------------------------------------------------------
 // OAuth token response
@@ -223,19 +200,6 @@ export function mockStkQueryStillProcessing(
   }
 }
 
-export function mockStkQuerySuccess(
-  checkoutRequestId: string = 'ws_CO_191220191020363925'
-): StkQueryShape {
-  return {
-    ResponseCode: '0',
-    ResponseDescription: 'The service request has been accepted successsfully',
-    MerchantRequestID: '29115-34620561-1',
-    CheckoutRequestID: checkoutRequestId,
-    ResultCode: '0',
-    ResultDesc: 'The service request is processed successfully.',
-  }
-}
-
 export function mockStkQueryCancelled(
   checkoutRequestId: string = 'ws_CO_191220191020363925'
 ): StkQueryShape {
@@ -297,5 +261,3 @@ export function makeTokenThenApiMock(
     } as Response)
   })
 }
-
-import { vi } from 'vitest'

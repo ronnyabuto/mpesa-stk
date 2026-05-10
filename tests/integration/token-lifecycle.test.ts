@@ -1,13 +1,3 @@
-/**
- * token-lifecycle.test.ts
- *
- * OAuth token edge cases: expiry, caching, and boundary conditions.
- *
- * Sources:
- *   https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
- *   https://github.com/safaricom/mpesa-php-sdk/issues (issue #59 — 503 on OAuth endpoint)
- */
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { fetchAccessToken, clearTokenCache } from '../../src/initiate.js'
 import type { MpesaConfig } from '../../src/types.js'
@@ -46,11 +36,6 @@ afterEach(() => {
 })
 
 describe('token caching', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — token valid for 3600 seconds, should be cached.
-   * PRODUCTION IMPACT: fetching a new token on every request wastes quota and adds latency.
-   */
   it('reuses a cached token when called multiple times within expiry window', async () => {
     const mockFetch = makeTokenFetch('token-abc')
     vi.stubGlobal('fetch', mockFetch)
@@ -62,37 +47,24 @@ describe('token caching', () => {
     expect(t1).toBe('token-abc')
     expect(t2).toBe('token-abc')
     expect(t3).toBe('token-abc')
-    expect(mockFetch).toHaveBeenCalledTimes(1) // Only one HTTP call
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — token expires after 3600 seconds.
-   * Package source (initiate.ts line 125): cache is invalidated 60 seconds BEFORE expiry.
-   * PRODUCTION IMPACT: a token used at exactly 3599 seconds (still >60s buffer) is reused.
-   */
-  it('serves cached token at 3599 seconds (within 60s safety buffer)', async () => {
+  // Cache is invalidated 60 seconds before Daraja's expiry — at 3539s the token is still live
+  it('serves cached token at 3539 seconds (within 60s safety buffer)', async () => {
     vi.useFakeTimers()
     const mockFetch = makeTokenFetch('fresh-token')
     vi.stubGlobal('fetch', mockFetch)
 
     await fetchAccessToken(CONFIG)
-
-    // Advance 3539 seconds (3600 - 61 = still within the safety window)
     vi.advanceTimersByTime(3539 * 1000)
 
     const token = await fetchAccessToken(CONFIG)
     expect(token).toBe('fresh-token')
-    expect(mockFetch).toHaveBeenCalledTimes(1) // Still using cache
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — token expires after 3600 seconds.
-   * Package source (initiate.ts line 125): cache invalidated when < 60s remains.
-   * PRODUCTION IMPACT: if the expiry boundary is not respected, expired tokens are sent and
-   * Daraja returns 404.001.03 Invalid Access Token on all subsequent requests.
-   */
+  // At 3541s only 59s remain — below the 60s buffer, so a fresh token is fetched
   it('fetches a new token when the cached token has less than 60 seconds remaining', async () => {
     vi.useFakeTimers()
 
@@ -100,7 +72,6 @@ describe('token caching', () => {
     vi.stubGlobal('fetch', firstMock)
     await fetchAccessToken(CONFIG)
 
-    // Advance to 3541 seconds (only 59s remaining before expiry)
     vi.advanceTimersByTime(3541 * 1000)
 
     const secondMock = makeTokenFetch('token-second')
@@ -111,12 +82,6 @@ describe('token caching', () => {
     expect(secondMock).toHaveBeenCalledTimes(1)
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — sandbox and production are separate environments.
-   * PRODUCTION IMPACT: if tokens are shared across environments, sandbox tokens get used
-   * in production (or vice versa), causing auth failures.
-   */
   it('maintains separate token caches for sandbox and production environments', async () => {
     const sandboxFetch = makeTokenFetch('sandbox-token')
     vi.stubGlobal('fetch', sandboxFetch)
@@ -131,12 +96,7 @@ describe('token caching', () => {
     expect(sandboxToken).not.toBe(prodToken)
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — expires_in is returned as STRING "3600".
-   * PRODUCTION IMPACT: if expires_in is not parsed via parseInt, NaN expiry means
-   * every request gets a new token (cache never hits) — silent performance regression.
-   */
+  // expires_in arrives from Daraja as a string "3600" — must be parsed, not used as-is
   it('correctly handles expires_in returned as string (not number)', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -151,14 +111,9 @@ describe('token caching', () => {
 
     expect(t1).toBe('str-expiry-token')
     expect(t2).toBe('str-expiry-token')
-    expect(mockFetch).toHaveBeenCalledTimes(1) // Cache works with string expires_in
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: package source (initiate.ts line 149) — fallback to 3600 if expires_in is NaN.
-   * PRODUCTION IMPACT: a malformed or missing expires_in from Daraja must not crash the token fetch.
-   */
   it('falls back to 3600 seconds when expires_in is not parseable', async () => {
     vi.useFakeTimers()
     const mockFetch = vi.fn().mockResolvedValue({
@@ -172,7 +127,6 @@ describe('token caching', () => {
     const token = await fetchAccessToken(CONFIG)
     expect(token).toBe('nan-expiry-token')
 
-    // Should still be cached (fallback expiry = 3600s, cache within 60s buffer)
     const token2 = await fetchAccessToken(CONFIG)
     expect(token2).toBe('nan-expiry-token')
     expect(mockFetch).toHaveBeenCalledTimes(1)
@@ -180,11 +134,6 @@ describe('token caching', () => {
 })
 
 describe('token error handling', () => {
-  /**
-   * SOURCE: https://github.com/safaricom/mpesa-php-sdk/issues (issue #59)
-   * CONFIRMED BY: github issue — "Error: call to URL .../oauth/v1/generate... failed with status 503"
-   * PRODUCTION IMPACT: 503 during high load causes all concurrent STK initiations to fail.
-   */
   it('throws a descriptive error including the HTTP status code on OAuth failure', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -197,12 +146,6 @@ describe('token error handling', () => {
     await expect(fetchAccessToken(CONFIG)).rejects.toThrow('503')
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — 401 returned for invalid credentials.
-   * PRODUCTION IMPACT: bad credentials used in production will silently fail all payments
-   * if the error is not surfaced clearly.
-   */
   it('throws a descriptive error on 401 Unauthorized (invalid credentials)', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -215,11 +158,6 @@ describe('token error handling', () => {
     await expect(fetchAccessToken(CONFIG)).rejects.toThrow('401')
   })
 
-  /**
-   * SOURCE: https://dev.to/msnmongare/safaricom-daraja-api-authorization-api-guide-for-access-tokens-2kg1
-   * CONFIRMED BY: developer docs — clearTokenCache is a test utility.
-   * PRODUCTION IMPACT: after clearing cache, the next call MUST fetch a fresh token.
-   */
   it('fetches a fresh token after cache is cleared', async () => {
     const firstMock = makeTokenFetch('original-token')
     vi.stubGlobal('fetch', firstMock)

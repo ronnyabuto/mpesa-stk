@@ -102,36 +102,37 @@ describe('pollPaymentStatus', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('poll finds SUCCESS on attempt 2 — onPaymentSettled fires, polling stops', async () => {
+  it('callback arrives during poll sleep — poll detects SUCCESS on storage re-check without querying Daraja again', async () => {
     await adapter.createPayment(makeRecord())
 
-    // fetch returns: token, pending query, token, success query
-    stubFetch([
-      { ok: true, body: tokenResponse },
-      { ok: true, body: queryResponse('0', 'The service request is processed successfully.') },
-    ])
+    // Poll will sleep 3 s on attempt 0. During that sleep we simulate the callback
+    // arriving by updating storage directly. The poll's re-check after the sleep
+    // should see SUCCESS and return without touching Daraja.
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
 
-    const settledHandler = vi.fn()
-
-    // Run the poll — advance timers to fire each sleep()
     const pollPromise = pollPaymentStatus(
       'ws_CO_011120241020363925',
       config,
-      adapter,
-      settledHandler
+      adapter
     )
 
-    // Advance past first delay (3000ms)
-    await vi.runAllTimersAsync()
+    // Advance halfway through the first sleep — callback "arrives"
+    await vi.advanceTimersByTimeAsync(1500)
+    await adapter.settlePayment('pay-001', {
+      status: 'SUCCESS',
+      mpesaReceiptNumber: 'NLJ7RT61SV',
+      completedAt: new Date(),
+    })
+
+    // Advance past the rest of the first sleep so the poll re-checks storage
+    await vi.advanceTimersByTimeAsync(2000)
 
     const status = await pollPromise
 
-    // ResultCode '0' from the query means still-pending per our poll logic
-    // Let's instead simulate attempt 1 still processing, attempt 2 gives non-zero result
-    // The test title says "SUCCESS on attempt 2" — we'll verify the handler fires
-    // In this test fetch always returns ResultCode 0 which is "still processing",
-    // so the poll exhausts and sets TIMEOUT. Let's restructure to test properly:
-    expect(['SUCCESS', 'TIMEOUT', 'FAILED', 'CANCELLED']).toContain(status)
+    expect(status).toBe('SUCCESS')
+    // Poll must not have made any network calls — storage re-check was enough
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('poll finds a terminal non-zero result — onPaymentSettled fires with correct status', async () => {

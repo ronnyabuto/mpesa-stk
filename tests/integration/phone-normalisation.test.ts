@@ -1,22 +1,7 @@
-/**
- * phone-normalisation.test.ts
- *
- * Real Kenyan phone number formats and normalisation edge cases.
- *
- * Sources:
- *   https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
- *   Web search results confirming PhoneNumber must be in 254XXXXXXXXX format
- */
-
 import { describe, it, expect } from 'vitest'
 import { normalisePhoneNumber } from '../../src/initiate.js'
 
 describe('normalisePhoneNumber — Safaricom (07xx) numbers', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
-   * CONFIRMED BY: developer docs — phone numbers must use 254 country code format.
-   * PRODUCTION IMPACT: sending 07xxxxxxxx without normalisation causes API rejection.
-   */
   it('normalises 0712345678 to 254712345678', () => {
     expect(normalisePhoneNumber('0712345678')).toBe('254712345678')
   })
@@ -35,11 +20,6 @@ describe('normalisePhoneNumber — Safaricom (07xx) numbers', () => {
 })
 
 describe('normalisePhoneNumber — Airtel Kenya (010x, 011x) numbers', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
-   * CONFIRMED BY: package source (initiate.ts) — covers Airtel Kenya 010x/011x prefixes.
-   * PRODUCTION IMPACT: Airtel numbers used in M-Pesa STK Push are valid.
-   */
   it('normalises 0100000000 to 254100000000', () => {
     expect(normalisePhoneNumber('0100000000')).toBe('254100000000')
   })
@@ -50,11 +30,6 @@ describe('normalisePhoneNumber — Airtel Kenya (010x, 011x) numbers', () => {
 })
 
 describe('normalisePhoneNumber — international format inputs', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
-   * CONFIRMED BY: developer docs — 254XXXXXXXXX is the required format.
-   * PRODUCTION IMPACT: passing +2547xx (common in UI inputs) must be handled without throwing.
-   */
   it('normalises +254712345678 to 254712345678', () => {
     expect(normalisePhoneNumber('+254712345678')).toBe('254712345678')
   })
@@ -73,11 +48,6 @@ describe('normalisePhoneNumber — international format inputs', () => {
 })
 
 describe('normalisePhoneNumber — format with spaces or dashes (common UI input)', () => {
-  /**
-   * SOURCE: package source (initiate.ts line 24) — strips non-digit characters first.
-   * CONFIRMED BY: package design — normalisation strips \D characters before validation.
-   * PRODUCTION IMPACT: phone numbers from forms often include spaces or dashes.
-   */
   it('normalises 0712 345 678 (spaces) to 254712345678', () => {
     expect(normalisePhoneNumber('0712 345 678')).toBe('254712345678')
   })
@@ -92,11 +62,6 @@ describe('normalisePhoneNumber — format with spaces or dashes (common UI input
 })
 
 describe('normalisePhoneNumber — invalid inputs that must throw', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
-   * CONFIRMED BY: developer docs — invalid phone numbers cause API rejection.
-   * PRODUCTION IMPACT: invalid numbers must be caught early (before API call) with clear errors.
-   */
   it('throws for an empty string', () => {
     expect(() => normalisePhoneNumber('')).toThrow(/Invalid phone number/)
   })
@@ -127,11 +92,6 @@ describe('normalisePhoneNumber — invalid inputs that must throw', () => {
 })
 
 describe('normalisePhoneNumber — boundary values for Kenyan numbers', () => {
-  /**
-   * SOURCE: https://dev.to/msnmongare/m-pesa-express-stk-push-api-guide-40a2
-   * CONFIRMED BY: developer docs — 254 followed by exactly 9 digits = valid.
-   * PRODUCTION IMPACT: accepting invalid-length numbers can cause cryptic API errors.
-   */
   it('accepts exactly 12-digit 254XXXXXXXXX number', () => {
     const result = normalisePhoneNumber('254708374149')
     expect(result).toBe('254708374149')
@@ -146,16 +106,9 @@ describe('normalisePhoneNumber — boundary values for Kenyan numbers', () => {
 })
 
 describe('normalisePhoneNumber — PhoneNumber as returned in callback (number type)', () => {
-  /**
-   * SOURCE: https://github.com/Bascil/mpesa-daraja-api-php/blob/master/docs/LipaNaMpesaOnline.md
-   * Web search: "PhoneNumber": 254727894083 in callback (integer, no + prefix, 12 digits).
-   * CONFIRMED BY: developer docs — PhoneNumber in callback is a number like 254708374149.
-   * PRODUCTION IMPACT: callback PhoneNumber is a number but normalisePhoneNumber expects string.
-   * If you call normalisePhoneNumber(callbackPhoneNumber.toString()), it must work.
-   */
-  it('normalises a callback PhoneNumber (integer as string) correctly', () => {
-    // Callback delivers PhoneNumber as number 254708374149
-    // When converted to string for normalisation:
+  // Callback delivers PhoneNumber as a bare integer (e.g. 254708374149), not a string.
+  // Callers who coerce it with .toString() before passing must still get the right result.
+  it('normalises a callback PhoneNumber coerced to string correctly', () => {
     expect(normalisePhoneNumber('254708374149')).toBe('254708374149')
   })
 })
