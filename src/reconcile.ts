@@ -23,9 +23,22 @@ function queryStatusToPaymentStatus(response: DarajaQueryResponse): PaymentStatu
 // Main reconciliation function
 // ---------------------------------------------------------------------------
 
+// All statuses are reconcilable: any stored status can diverge from Daraja's record.
+// PENDING/SUCCESS are the obvious cases; FAILED/CANCELLED/TIMEOUT/EXPIRED cover the
+// inverse — a payment your system wrote off that Daraja actually shows as SUCCESS
+// (money moved, but you have no receipt). That is the most financially dangerous mismatch.
+const RECONCILABLE_STATUSES: PaymentStatus[] = [
+  'PENDING', 'SUCCESS', 'FAILED', 'CANCELLED', 'TIMEOUT', 'EXPIRED',
+]
+
 /**
- * Fetch all PENDING and SUCCESS payments in [from, to], query Daraja for each,
- * and report status mismatches.
+ * Fetch all payments in [from, to] across all statuses, query Daraja for each,
+ * and report status mismatches. Catches three classes of drift:
+ *
+ *   - PENDING that quietly settled — callback never arrived, poll exhausted
+ *   - SUCCESS with no Daraja record — ghost credit on your side
+ *   - FAILED/CANCELLED/TIMEOUT/EXPIRED that Daraja shows as SUCCESS — money moved
+ *     but your system has no receipt (the most financially dangerous case)
  *
  * This function does NOT auto-correct mismatches. It returns them so the caller
  * can decide how to handle each one (notify, investigate, or bulk-update).
@@ -43,13 +56,7 @@ export async function reconcile(
 ): Promise<ReconciliationResult> {
   logger?.info('Starting reconciliation', { from, to })
 
-  // Collect payments we want to verify: PENDING (might have been paid) and SUCCESS (might be ghost)
-  const [pendingPayments, successPayments] = await Promise.all([
-    storage.getPaymentsByStatusAndDateRange('PENDING', from, to),
-    storage.getPaymentsByStatusAndDateRange('SUCCESS', from, to),
-  ])
-
-  const allPayments = [...pendingPayments, ...successPayments]
+  const allPayments = await storage.getPaymentsByStatusAndDateRange(RECONCILABLE_STATUSES, from, to)
 
   logger?.info('Reconciliation: payments to check', { count: allPayments.length })
 

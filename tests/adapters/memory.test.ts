@@ -74,7 +74,7 @@ describe('MemoryAdapter', () => {
 
     const from = new Date('2024-11-01T09:00:00Z')
     const to = new Date('2024-11-01T23:59:59Z')
-    const results = await adapter.getPaymentsByStatusAndDateRange('PENDING', from, to)
+    const results = await adapter.getPaymentsByStatusAndDateRange(['PENDING'], from, to)
 
     expect(results.map((r) => r.id).sort()).toEqual(['p1', 'p3'])
   })

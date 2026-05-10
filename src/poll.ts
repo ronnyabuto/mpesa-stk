@@ -1,4 +1,4 @@
-import type { MpesaConfig, PaymentStatus, Logger, DarajaQueryResponse } from './types.js'
+import type { MpesaConfig, PaymentStatus, PaymentRecord, Logger, DarajaQueryResponse } from './types.js'
 import type { StorageAdapter } from './adapters/types.js'
 import { resultCodeToStatus } from './callback.js'
 import { queryStkStatus } from './daraja.js'
@@ -23,6 +23,9 @@ function getDelay(attempt: number): number {
 // In-flight guard — prevents duplicate concurrent polls for the same ID
 // ---------------------------------------------------------------------------
 
+// Process-local: does not coordinate across multiple Node.js processes or
+// serverless invocations. Concurrent polls from separate processes are safe
+// because settlePayment uses an atomic CAS — only one writer wins.
 const activePollIds = new Set<string>()
 
 // ---------------------------------------------------------------------------
@@ -41,7 +44,7 @@ export async function pollPaymentStatus(
   checkoutRequestId: string,
   config: MpesaConfig,
   storage: StorageAdapter,
-  onSettled?: (payment: import('./types.js').PaymentRecord) => void | Promise<void>,
+  onSettled?: (payment: PaymentRecord) => void | Promise<void>,
   logger?: Logger
 ): Promise<PaymentStatus> {
   // Check storage before acquiring the lock — callback may have already arrived
@@ -120,12 +123,21 @@ export async function pollPaymentStatus(
           status,
         })
 
-        await storage.updatePayment(current.id, {
+        // Atomic CAS: only wins if callback hasn't already settled this payment
+        const claimed = await storage.settlePayment(current.id, {
           status,
           failureReason: queryResult.ResultDesc,
           resultCode,
           completedAt: now,
         })
+
+        if (!claimed) {
+          logger?.info('Poll lost race to concurrent callback — returning callback status', {
+            checkoutRequestId,
+          })
+          const current2 = await storage.getPayment(current.id)
+          return current2?.status ?? status
+        }
 
         const updated = await storage.getPayment(current.id)
         if (updated && onSettled) {
@@ -148,11 +160,19 @@ export async function pollPaymentStatus(
         checkoutRequestId,
         maxAttempts,
       })
-      await storage.updatePayment(payment.id, {
+
+      // Atomic CAS: a callback may have arrived in the final sleep window
+      const claimed = await storage.settlePayment(payment.id, {
         status: 'TIMEOUT',
         failureReason: 'Polling exhausted: no response from Daraja within retry window',
         completedAt: new Date(),
       })
+
+      if (!claimed) {
+        logger?.info('Poll TIMEOUT lost race to concurrent callback', { checkoutRequestId })
+        const current = await storage.getPayment(payment.id)
+        return current?.status ?? 'TIMEOUT'
+      }
 
       const updated = await storage.getPayment(payment.id)
       if (updated && onSettled) {

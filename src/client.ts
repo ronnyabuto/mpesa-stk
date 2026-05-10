@@ -23,6 +23,11 @@ export class MpesaStk {
 
   private settledHandlers: Array<(payment: PaymentRecord) => void | Promise<void>> = []
 
+  // In-process guard: prevents two concurrent initiations with the same idempotency
+  // key from both hitting Daraja before either registers the key in storage.
+  // Does not protect across separate processes — the UNIQUE DB constraint handles that.
+  private readonly pendingIdempotencyKeys = new Set<string>()
+
   constructor(
     config: MpesaConfig,
     private readonly storage: StorageAdapter,
@@ -35,10 +40,6 @@ export class MpesaStk {
       ...config,
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // Register a handler that fires when any payment reaches a terminal status
-  // ---------------------------------------------------------------------------
 
   onPaymentSettled(handler: (payment: PaymentRecord) => void | Promise<void>): void {
     this.settledHandlers.push(handler)
@@ -57,15 +58,27 @@ export class MpesaStk {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Initiate a payment
-  // ---------------------------------------------------------------------------
-
   async initiatePayment(params: InitiatePaymentParams): Promise<InitiatePaymentResult> {
     const normalisedPhone = normalisePhoneNumber(params.phoneNumber)
 
-    // Idempotency check — if a key is provided, look for an existing record first
     if (params.idempotencyKey) {
+      // If another in-flight request is already processing this key, defer to storage.
+      // This handles the in-process race; the DB UNIQUE constraint handles cross-process.
+      if (this.pendingIdempotencyKeys.has(params.idempotencyKey)) {
+        const existing = await this.storage.getPaymentByIdempotencyKey(params.idempotencyKey)
+        if (existing) {
+          this.logger?.info('Idempotent re-request (in-flight collision): returning existing payment', {
+            idempotencyKey: params.idempotencyKey,
+            paymentId: existing.id,
+          })
+          return {
+            checkoutRequestId: existing.checkoutRequestId,
+            merchantRequestId: existing.merchantRequestId,
+            paymentId: existing.id,
+          }
+        }
+      }
+
       const existing = await this.storage.getPaymentByIdempotencyKey(params.idempotencyKey)
       if (existing) {
         this.logger?.info('Idempotent re-request: returning existing payment', {
@@ -78,39 +91,40 @@ export class MpesaStk {
           paymentId: existing.id,
         }
       }
+
+      this.pendingIdempotencyKeys.add(params.idempotencyKey)
     }
 
-    const { merchantRequestId, checkoutRequestId } = await initiateStkPush(
-      this.config,
-      { ...params, normalisedPhone },
-      this.logger
-    )
+    try {
+      const { merchantRequestId, checkoutRequestId } = await initiateStkPush(
+        this.config,
+        { ...params, normalisedPhone },
+        this.logger
+      )
 
-    const paymentId = randomUUID()
-    const record: PaymentRecord = {
-      id: paymentId,
-      checkoutRequestId,
-      merchantRequestId,
-      phoneNumber: normalisedPhone,
-      amount: params.amount,
-      accountReference: params.accountReference,
-      status: 'PENDING',
-      initiatedAt: new Date(),
+      const paymentId = randomUUID()
+      const record: PaymentRecord = {
+        id: paymentId,
+        checkoutRequestId,
+        merchantRequestId,
+        phoneNumber: normalisedPhone,
+        amount: params.amount,
+        accountReference: params.accountReference,
+        status: 'PENDING',
+        initiatedAt: new Date(),
+      }
+
+      // Key is passed directly to createPayment so it is stored in the same
+      // atomic operation as the record — no crash window between two calls.
+      await this.storage.createPayment(record, params.idempotencyKey)
+
+      return { checkoutRequestId, merchantRequestId, paymentId }
+    } finally {
+      if (params.idempotencyKey) {
+        this.pendingIdempotencyKeys.delete(params.idempotencyKey)
+      }
     }
-
-    await this.storage.createPayment(record)
-
-    // Register idempotency key after successful persist
-    if (params.idempotencyKey) {
-      await this.storage.registerIdempotencyKey(params.idempotencyKey, paymentId)
-    }
-
-    return { checkoutRequestId, merchantRequestId, paymentId }
   }
-
-  // ---------------------------------------------------------------------------
-  // Process incoming callback from Safaricom
-  // ---------------------------------------------------------------------------
 
   /**
    * Call this from your webhook route handler.
@@ -136,10 +150,6 @@ export class MpesaStk {
     return result
   }
 
-  // ---------------------------------------------------------------------------
-  // Manual poll trigger
-  // ---------------------------------------------------------------------------
-
   async pollPaymentStatus(checkoutRequestId: string): Promise<PaymentStatus> {
     return _pollPaymentStatus(
       checkoutRequestId,
@@ -151,10 +161,6 @@ export class MpesaStk {
       this.logger
     )
   }
-
-  // ---------------------------------------------------------------------------
-  // Reconciliation
-  // ---------------------------------------------------------------------------
 
   async reconcile(from: Date, to: Date): Promise<ReconciliationResult> {
     return _reconcile(from, to, this.config, this.storage, this.logger)

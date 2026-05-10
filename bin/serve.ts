@@ -55,11 +55,14 @@ async function main() {
     void recoverPendingDeliveries(storage, logger)
   }, 60_000)
 
-  process.on('SIGTERM', async () => {
+  const shutdown = async () => {
     logger.info('Shutting down')
     await pool.end()
     process.exit(0)
-  })
+  }
+
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
 }
 
 main().catch((err) => {

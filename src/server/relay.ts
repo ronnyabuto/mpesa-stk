@@ -1,4 +1,4 @@
-import { randomUUID, randomBytes } from 'node:crypto'
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto'
 import { Hono } from 'hono'
 import { validateCallbackStructure } from '../validate.js'
 import { scheduleDelivery } from './delivery.js'
@@ -33,10 +33,7 @@ export function createRelayServer(config: RelayServerConfig) {
   const { storage, logger } = config
   const app = new Hono()
 
-  // ---------------------------------------------------------------------------
   // POST /apps — register an application
-  // ---------------------------------------------------------------------------
-
   app.post('/apps', async (c) => {
     let body: unknown
     try {
@@ -71,11 +68,7 @@ export function createRelayServer(config: RelayServerConfig) {
     }, 201)
   })
 
-  // ---------------------------------------------------------------------------
-  // PATCH /apps/:appId — update target URL
-  // Auth: pass the signing secret as Bearer token
-  // ---------------------------------------------------------------------------
-
+  // PATCH /apps/:appId — update target URL (auth: Bearer signingSecret)
   app.patch('/apps/:appId', async (c) => {
     const { appId } = c.req.param()
 
@@ -87,7 +80,9 @@ export function createRelayServer(config: RelayServerConfig) {
     // Authenticate using the signing secret
     const authHeader = c.req.header('Authorization') ?? ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-    if (token !== app.signingSecret) {
+    const tokenBuf = Buffer.from(token)
+    const secretBuf = Buffer.from(app.signingSecret)
+    if (tokenBuf.length !== secretBuf.length || !timingSafeEqual(tokenBuf, secretBuf)) {
       return c.json({ error: 'Unauthorized' }, 401)
     }
 
@@ -110,10 +105,7 @@ export function createRelayServer(config: RelayServerConfig) {
     return c.json({ appId, targetUrl })
   })
 
-  // ---------------------------------------------------------------------------
   // POST /hooks/:appId — inbound Safaricom callback
-  // ---------------------------------------------------------------------------
-
   app.post('/hooks/:appId', async (c) => {
     const { appId } = c.req.param()
 
@@ -181,11 +173,7 @@ export function createRelayServer(config: RelayServerConfig) {
     return c.json({ ResultCode: 0, ResultDesc: 'Success' })
   })
 
-  // ---------------------------------------------------------------------------
-  // GET /status/:checkoutRequestId — query delivery status
-  // Query param: ?app_id=<appId>
-  // ---------------------------------------------------------------------------
-
+  // GET /status/:checkoutRequestId?app_id=<appId>
   app.get('/status/:checkoutRequestId', async (c) => {
     const { checkoutRequestId } = c.req.param()
     const appId = c.req.query('app_id')
