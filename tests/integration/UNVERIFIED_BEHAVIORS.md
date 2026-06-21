@@ -1,7 +1,9 @@
 # UNVERIFIED_BEHAVIORS.md
 
-Behaviors reported by developers but not confirmed by any source fetched during this session.
+Behaviors the library assumes that were not confirmed from official sources at the time of writing.
 These must NOT be encoded as passing tests until confirmed.
+
+Items 7, 8, and 10 were verified/observed directly against the live Daraja sandbox on 2026-06-20.
 
 ---
 
@@ -68,16 +70,15 @@ These must NOT be encoded as passing tests until confirmed.
 ## 7. STK Query Endpoint Path
 
 **Used in code:** `/mpesa/stkpushquery/v1/query`
-**Status:** Not confirmed from any official doc fetched (developer.safaricom.co.ke was unreachable). Confirmed indirectly from package source. This path is widely used across open-source implementations.
-**Action needed:** Confirm from official Safaricom docs when the portal becomes accessible.
+**Status:** VERIFIED (sandbox, 2026-06-20). A live `POST` to `https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query` returned the documented `DarajaQueryResponse` shape (`ResponseCode`, `ResultCode` as a string, `ResultDesc`, …). Path is correct.
 
 ---
 
 ## 8. Daraja Rate Limiting on STK Query
 
 **Mentioned in:** Package source (reconcile.ts comment): "Caller should handle rate-limiting: Daraja has per-second query limits."
-**Status:** UNVERIFIED — no specific rate limit number confirmed from any fetched source.
-**Action needed:** Confirm exact rate limit (requests per second) from official Safaricom documentation.
+**Status:** VERIFIED in sandbox (2026-06-20). The endpoint is behind an Apigee SpikeArrest policy returning `HTTP 429` at `messagesPerPeriod=5, periodInMicroseconds=60000000, maxBurstMessageCount=1.0` — i.e. **5 requests / 60s, burst 1**. The production ceiling is still unpublished, so the library reacts to `429` with adaptive backoff (`reconcile`) rather than assuming a fixed rate.
+**Action needed:** Confirm the production limit when the official docs expose it.
 
 ---
 
@@ -88,3 +89,12 @@ These must NOT be encoded as passing tests until confirmed.
 **Status:** UNVERIFIED.
 **Action needed:** Confirm whether Daraja accepts tokens for N seconds after official expiry.
 The package applies a 60-second safety buffer (expires 60s early) to avoid hitting any boundary.
+
+---
+
+## 10. STK Query ResultCode 4999 — Transient / Still Processing
+
+**Observed:** Live sandbox, 2026-06-20. Querying a freshly-initiated transaction returned `ResultCode "4999"` while it was still settling (a later query on a comparable transaction returned the real terminal `1037`). Querying too early instead returned `HTTP 400 / 400.002.02 "Invalid CheckoutRequestID"`. So one in-flight transaction can return `400`, `4999`, or a terminal code depending on timing.
+**Status:** OBSERVED but undocumented — `4999` is not in any official or third-party ResultCode list found.
+**How the library treats it:** non-terminal. The poll loop keeps polling on `4999`/unknown/`NaN` (never settles `FAILED`); `reconcile` counts it as `skipped`. Only a known-terminal code settles a payment. See `terminalQueryStatus` in `src/callback.ts`.
+**Action needed:** Confirm 4999's official meaning if the docs ever enumerate it.
