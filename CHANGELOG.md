@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] — 2026-06-21
+
+Docs only — no code change.
+
+- Trimmed the README (235 → 112 lines) to what/why/how/usage, grounded in the live-sandbox findings.
+- Restored the reconciliation drift table, corrected: the "ghost credit" (your DB `SUCCESS`, Daraja has no record) and transient `4999`/`429` cases surface as `skipped`, not mismatches — `reconcile` never reports a status it can't read.
+- Replaced the stale `~10 req/s` reconciliation rate-limit note with the observed Apigee SpikeArrest (5 req/60s, burst 1) and the `429` backoff behaviour.
+- Fixed the documented poll schedule to match `pollIntervalMs`, and the dedup section now leads with the atomic CAS.
+- Marked the STK Query endpoint path and rate limit as verified in sandbox; documented the `4999` transient code.
+
 ## [0.3.0] — 2026-06-21
 
 Reliability fixes found by stress-testing against the live Daraja sandbox.
