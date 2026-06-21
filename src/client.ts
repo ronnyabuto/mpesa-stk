@@ -23,10 +23,12 @@ export class MpesaStk {
 
   private settledHandlers: Array<(payment: PaymentRecord) => void | Promise<void>> = []
 
-  // In-process guard: prevents two concurrent initiations with the same idempotency
-  // key from both hitting Daraja before either registers the key in storage.
-  // Does not protect across separate processes — the UNIQUE DB constraint handles that.
-  private readonly pendingIdempotencyKeys = new Set<string>()
+  // In-process guard: concurrent initiations with the same idempotency key share
+  // ONE in-flight Daraja call. A second caller awaits the first caller's promise
+  // instead of issuing its own STK Push — so a double-tapped "Pay" button or a
+  // retried HTTP request charges the customer exactly once. Cross-process
+  // duplicates are still caught by the idempotency_key UNIQUE DB constraint.
+  private readonly inFlightInitiations = new Map<string, Promise<InitiatePaymentResult>>()
 
   constructor(
     config: MpesaConfig,
@@ -61,69 +63,73 @@ export class MpesaStk {
   async initiatePayment(params: InitiatePaymentParams): Promise<InitiatePaymentResult> {
     const normalisedPhone = normalisePhoneNumber(params.phoneNumber)
 
-    if (params.idempotencyKey) {
-      // If another in-flight request is already processing this key, defer to storage.
-      // This handles the in-process race; the DB UNIQUE constraint handles cross-process.
-      if (this.pendingIdempotencyKeys.has(params.idempotencyKey)) {
-        const existing = await this.storage.getPaymentByIdempotencyKey(params.idempotencyKey)
-        if (existing) {
-          this.logger?.info('Idempotent re-request (in-flight collision): returning existing payment', {
-            idempotencyKey: params.idempotencyKey,
-            paymentId: existing.id,
-          })
-          return {
-            checkoutRequestId: existing.checkoutRequestId,
-            merchantRequestId: existing.merchantRequestId,
-            paymentId: existing.id,
-          }
-        }
-      }
-
-      const existing = await this.storage.getPaymentByIdempotencyKey(params.idempotencyKey)
-      if (existing) {
-        this.logger?.info('Idempotent re-request: returning existing payment', {
-          idempotencyKey: params.idempotencyKey,
-          paymentId: existing.id,
-        })
-        return {
-          checkoutRequestId: existing.checkoutRequestId,
-          merchantRequestId: existing.merchantRequestId,
-          paymentId: existing.id,
-        }
-      }
-
-      this.pendingIdempotencyKeys.add(params.idempotencyKey)
+    if (!params.idempotencyKey) {
+      return this.executeInitiation(params, normalisedPhone)
     }
 
+    const key = params.idempotencyKey
+
+    // Already completed by an earlier request (this process or another)?
+    const existing = await this.storage.getPaymentByIdempotencyKey(key)
+    if (existing) {
+      this.logger?.info('Idempotent re-request: returning existing payment', {
+        idempotencyKey: key,
+        paymentId: existing.id,
+      })
+      return {
+        checkoutRequestId: existing.checkoutRequestId,
+        merchantRequestId: existing.merchantRequestId,
+        paymentId: existing.id,
+      }
+    }
+
+    // Another initiation for this key is in flight right now — await it instead
+    // of starting a second STK Push. The path from this get() to the set() below
+    // is synchronous, so two racers can never both miss and both proceed.
+    const inFlight = this.inFlightInitiations.get(key)
+    if (inFlight) {
+      this.logger?.info('Idempotent re-request (in-flight collision): awaiting first initiation', {
+        idempotencyKey: key,
+      })
+      return inFlight
+    }
+
+    const promise = this.executeInitiation(params, normalisedPhone)
+    this.inFlightInitiations.set(key, promise)
     try {
-      const { merchantRequestId, checkoutRequestId } = await initiateStkPush(
-        this.config,
-        { ...params, normalisedPhone },
-        this.logger
-      )
-
-      const paymentId = randomUUID()
-      const record: PaymentRecord = {
-        id: paymentId,
-        checkoutRequestId,
-        merchantRequestId,
-        phoneNumber: normalisedPhone,
-        amount: params.amount,
-        accountReference: params.accountReference,
-        status: 'PENDING',
-        initiatedAt: new Date(),
-      }
-
-      // Key is passed directly to createPayment so it is stored in the same
-      // atomic operation as the record — no crash window between two calls.
-      await this.storage.createPayment(record, params.idempotencyKey)
-
-      return { checkoutRequestId, merchantRequestId, paymentId }
+      return await promise
     } finally {
-      if (params.idempotencyKey) {
-        this.pendingIdempotencyKeys.delete(params.idempotencyKey)
-      }
+      this.inFlightInitiations.delete(key)
     }
+  }
+
+  private async executeInitiation(
+    params: InitiatePaymentParams,
+    normalisedPhone: string
+  ): Promise<InitiatePaymentResult> {
+    const { merchantRequestId, checkoutRequestId } = await initiateStkPush(
+      this.config,
+      { ...params, normalisedPhone },
+      this.logger
+    )
+
+    const paymentId = randomUUID()
+    const record: PaymentRecord = {
+      id: paymentId,
+      checkoutRequestId,
+      merchantRequestId,
+      phoneNumber: normalisedPhone,
+      amount: params.amount,
+      accountReference: params.accountReference,
+      status: 'PENDING',
+      initiatedAt: new Date(),
+    }
+
+    // Key is passed directly to createPayment so it is stored in the same
+    // atomic operation as the record — no crash window between two calls.
+    await this.storage.createPayment(record, params.idempotencyKey)
+
+    return { checkoutRequestId, merchantRequestId, paymentId }
   }
 
   /**

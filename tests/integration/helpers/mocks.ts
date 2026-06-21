@@ -229,6 +229,41 @@ export function mockStkQueryFailed(
 }
 
 // ---------------------------------------------------------------------------
+// STK Query — transient "still processing" code (ResultCode "4999")
+// SOURCE: observed live in the Safaricom sandbox, 2026-06-20 — querying a fresh
+// CheckoutRequestID before it settled returned ResultCode "4999". Undocumented
+// by Safaricom; it sits alongside the "500.001.1001 — transaction is being
+// processed" transport error. Must NOT be treated as a terminal failure.
+// ---------------------------------------------------------------------------
+
+export function mockStkQueryTransient4999(
+  checkoutRequestId: string = 'ws_CO_191220191020363925'
+): StkQueryShape {
+  return {
+    ResponseCode: '0',
+    ResponseDescription: 'The service request has been accepted successsfully',
+    MerchantRequestID: '29115-34620561-1',
+    CheckoutRequestID: checkoutRequestId,
+    ResultCode: '4999',
+    ResultDesc: 'An error occurred while processing the request.',
+  }
+}
+
+// ---------------------------------------------------------------------------
+// STK Query — HTTP 429 SpikeArrest violation (Apigee gateway)
+// SOURCE: observed live in the Safaricom sandbox, 2026-06-20 — the STK Query
+// endpoint returned HTTP 429 with this Apigee fault body at 5 req/60s, burst 1.
+// ---------------------------------------------------------------------------
+
+export const STK_QUERY_SPIKE_ARREST_BODY = {
+  fault: {
+    faultstring:
+      'Spike arrest violation. Allowed rate : MessageRate{messagesPerPeriod=5, periodInMicroseconds=60000000, maxBurstMessageCount=1.0}',
+    detail: { errorcode: 'policies.ratelimit.SpikeArrestViolation' },
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Helpers to build fetch mock that sequences multiple responses
 // ---------------------------------------------------------------------------
 

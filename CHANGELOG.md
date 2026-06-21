@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0] — 2026-06-21
+
+Reliability fixes found by stress-testing against the live Daraja sandbox.
+
+### Fixed
+
+- **Concurrent same-key initiations no longer double-charge.** `initiatePayment` calls with the same `idempotencyKey` that race in the same process now share one in-flight STK Push instead of each sending their own. A double-tapped "Pay" or a retried request reaches Daraja once. (The old in-process `Set` guard never actually waited.)
+- **Poll no longer marks pending payments FAILED on a transient query code.** The STK Query endpoint returns transient codes (e.g. `4999`, observed in sandbox) for a transaction that hasn't settled. The poll loop now settles only on a known-terminal code; `4999`, unrecognised codes, and `NaN` keep polling and resolve as `TIMEOUT`, which reconciliation then verifies.
+- **Reconciliation backs off on rate limiting instead of skipping.** The STK Query endpoint is behind an Apigee SpikeArrest policy (5 req/60s, burst 1 in sandbox). A `429` now raises a typed `DarajaRateLimitError`; reconcile retries the same payment with exponential backoff (honouring `Retry-After`) rather than counting it as unverified.
+
+### Changed
+
+- **Phone validation restricted to Kenyan mobile prefixes** (`07x`, `010`, `011`). Non-mobile inputs (landline `02x`, common `05x`/`09x` typos) are rejected locally instead of being forwarded to Daraja to fail opaquely.
+- **`pollIntervalMs` now drives the poll backoff.** It was documented but unused. The poll waits one interval before the first query, then a Fibonacci backoff (×1, 2, 3, 5, 8, 13, 21) capped at 30s — e.g. 5s → 10s → 15s → 25s → 30s at the default.
+
+### Tests
+
+- New coverage for the relay delivery engine (retry ladder, dead-lettering, outbound signing, restart recovery), webhook signature verification, true-concurrency dedup/idempotency, and real-world callback shapes (unordered metadata, string `TransactionDate`/`Amount`). 163 → 218 tests.
+
 ## [0.2.0] — 2026-04-03
 
 ### Added

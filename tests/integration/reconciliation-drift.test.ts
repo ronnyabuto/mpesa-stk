@@ -274,14 +274,7 @@ describe('reconcile — status mismatch detection', () => {
       if (callCount === 2) {
         return Promise.reject(new Error('Network error'))
       }
-      if (callCount === 3) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve(mockTokenResponse()),
-          text: () => Promise.resolve(''),
-        } as Response)
-      }
+      // Token is cached after call 1, so p2's query is call 3 (no token re-fetch).
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -349,7 +342,9 @@ describe('reconcile — status mismatch detection', () => {
     let tokenCalls = 0
     const mockFetch = vi.fn().mockImplementation(() => {
       tokenCalls++
-      if (tokenCalls % 2 === 1) {
+      // Only the first call fetches a token (it is cached thereafter); every
+      // subsequent call is a query, so both payments get a real query response.
+      if (tokenCalls === 1) {
         return Promise.resolve({
           ok: true,
           status: 200,
