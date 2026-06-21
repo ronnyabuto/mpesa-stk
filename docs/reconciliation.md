@@ -52,7 +52,7 @@ const result = await mpesa.reconcile(from, to)
 |---|---|
 | `checked` | Payments successfully queried against Daraja. These are either matched or have a mismatch. |
 | `matched` | Payments where your DB status agrees with Daraja. |
-| `skipped` | Payments where the Daraja STK Query API returned an error. These were NOT verified and are NOT counted in `checked`. |
+| `skipped` | Payments the query could not give a definite answer for — an HTTP error, a persistent `429`, or a transient/undocumented code like `4999`. NOT verified, NOT counted in `checked`. |
 
 **Important:** If you see `checked: 47` but you had 50 payments in the date range, the difference may be 3 skipped payments — not 3 matched payments. Always log `skipped` separately and re-run reconciliation for the same window if `skipped > 0`.
 
@@ -116,9 +116,10 @@ The recommended process for each mismatch:
 1. **Alert your team** (PagerDuty, Slack, email) with the full `ReconciliationMismatch` object
 2. **Cross-check** the `MpesaReceiptNumber` in Daraja's query response against the Safaricom M-Pesa Portal (business.safaricom.co.ke) for the authoritative source
 3. **If your DB says `PENDING` and Daraja confirms `SUCCESS`**: manually update your DB and fulfil the order, then investigate why the callback/poll missed it
-4. **If your DB says `SUCCESS` and Daraja does not recognise the transaction**: escalate to Safaricom support before taking any action — this may indicate a security incident
 
 ### Mismatch severity tiers
+
+A mismatch only appears when Daraja returns a *definite* status that disagrees with yours:
 
 | Stored | Daraja | Severity | Action |
 |--------|--------|----------|--------|
@@ -127,13 +128,26 @@ The recommended process for each mismatch:
 | SUCCESS | FAILED | Critical | Possible fraud or system bug — escalate to Safaricom |
 | TIMEOUT | SUCCESS | High | Customer paid, system gave up — investigate polling config |
 
+**The "ghost credit" case is a `skip`, not a mismatch.** If your DB says `SUCCESS` but Daraja has no record of the `CheckoutRequestID`, the query returns an error (`400.002.02 Invalid CheckoutRequestID`) and `reconcile` counts it as `skipped` — it never fabricates a status it can't read. A payment that is `SUCCESS` in your DB yet *persistently* skipped across reconciliation runs is the signal to escalate: it may be a spoofed callback. Watch `skipped`, not just `mismatches`.
+
 ---
 
 ## Rate Limiting
 
-`mpesa-stk` makes one STK Query API call per payment during reconciliation, with a 100ms pause between each query. That keeps throughput around 10 req/s, which stays below Safaricom's documented limits for most tiers.
+The STK Query endpoint sits behind an Apigee SpikeArrest policy. Observed against the live sandbox (June 2026):
 
-If your tier has a lower limit, or you're reconciling a large backlog, run reconciliation in smaller date range windows rather than one large pass. A date range covering 500 payments will take ~50 seconds at 100ms intervals; a 24-hour window with normal transaction volume is usually fine.
+```
+HTTP 429 — Spike arrest violation.
+MessageRate{messagesPerPeriod=5, periodInMicroseconds=60000000, maxBurstMessageCount=1.0}
+```
+
+That is **5 requests per minute, burst 1** — far tighter than the "~10 req/s" most integrations assume, and the limit is not published in the official docs. The production ceiling is unknown, so `reconcile` does not rely on a fixed guess:
+
+- A `429` raises a typed `DarajaRateLimitError`.
+- `reconcile` retries the **same** payment with exponential backoff (honouring `Retry-After`), up to 5 times, rather than skipping it.
+- Between payments it waits `reconcileQueryIntervalMs` (default 100ms) as a politeness floor; the adaptive backoff is the real throttle.
+
+For a large backlog, prefer smaller date-range windows over one big pass. If a payment is still rate-limited after the retries, it is counted as `skipped` — re-run that window later.
 
 ---
 

@@ -75,17 +75,18 @@ Reconciliation is the audit layer that catches what callbacks and polling both m
 
 ## The Polling Fallback Strategy
 
-`mpesa-stk` starts a background polling loop after every STK Push initiation. The loop uses a Fibonacci-ish schedule to avoid hammering Daraja's query API while still catching results quickly:
+`mpesa-stk` starts a background polling loop after every STK Push initiation. The loop uses a Fibonacci backoff built from `pollIntervalMs` (default 5000) — one base interval before the first query, then ×1, 2, 3, 5, 8, 13, 21, capped at 30s:
 
 ```
-Attempt:  1      2      3      4       5       6+
-Delay:    3000   5000   8000   13000   21000   30000 ms
+pollIntervalMs = 5000 (default):
+Attempt:  1     2      3      4      5      6+
+Delay:    5s    10s    15s    25s    30s    30s
 ```
 
 The loop stops when:
 
 1. A real callback arrives (storage status changes from `PENDING`) — detected during the sleep between attempts
-2. The STK Query API returns a non-zero ResultCode (terminal state)
+2. The STK Query returns a **known-terminal** ResultCode — and only then. The query also returns transient codes for a transaction that hasn't settled (`0` = still processing, the undocumented `4999` seen in sandbox); those keep the loop polling rather than settling the payment. A non-zero code is *not* automatically terminal — settling a pending payment FAILED on a transient code is the dangerous direction.
 3. `maxPollAttempts` is exhausted — payment is marked `TIMEOUT`
 
 **Tradeoffs:**
@@ -98,13 +99,13 @@ The loop stops when:
 
 ## Deduplication Is Non-Negotiable
 
-`mpesa-stk` deduplicates callbacks using the `CheckoutRequestID` field combined with the stored `status` field:
+`mpesa-stk` looks up the payment by `CheckoutRequestID` and settles it with an atomic compare-and-swap, not a read-then-check:
 
-```
-If stored status !== PENDING → this is a duplicate → return isDuplicate: true, do nothing
+```sql
+UPDATE mpesa_payments SET status = $1, ... WHERE id = $2 AND status = 'PENDING'
 ```
 
-This check is O(1) against your storage adapter. The entire deduplication logic is in `callback.ts:processCallback`.
+An early `status !== PENDING` check returns `isDuplicate: true` for the common case cheaply, but the check alone has a race: two callbacks fired milliseconds apart both read `PENDING` and both proceed. The CAS is what actually closes it — only one writer gets `rowCount = 1`, the loser yields, and `onPaymentSettled` fires exactly once. Verified under true concurrency (four simultaneous duplicate callbacks settle once) in the test suite. The logic is in `callback.ts:processCallback` and the adapter's `settlePayment`.
 
 **Why not use `MerchantRequestID`?** Both IDs are present in the callback, but `CheckoutRequestID` is the more stable key — it is what the STK Query API also uses, making it the correct join key across the full lifecycle.
 
@@ -155,7 +156,7 @@ Safaricom does not sign STK Push callbacks with an HMAC, JWT, or shared secret. 
    ```
    Safaricom may update these ranges — verify against the Daraja portal documentation.
 
-2. **Reconciliation** — Even if a spoofed callback writes a `SUCCESS` status to your database, scheduled reconciliation against the STK Query API will detect the drift (your DB says `SUCCESS`, Daraja has no record) and flag it as a mismatch.
+2. **Reconciliation** — A spoofed `SUCCESS` in your DB surfaces during scheduled reconciliation: Daraja has no record of the `CheckoutRequestID`, so the query errors (`400.002.02 Invalid CheckoutRequestID`) and `reconcile` counts the payment as `skipped` rather than verified. A `SUCCESS` row that is *persistently* skipped is the tell — watch the `skipped` count, not just `mismatches`.
 
 3. **Keep the callback URL secret** — Do not publish it in client-side code, browser JavaScript, or public repositories. Use an unpredictable path (e.g., `/api/mpesa/callback/a3f9b2c4`).
 
