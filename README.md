@@ -112,7 +112,7 @@ The in-process guard doesn't coordinate across Node.js processes — the DB cons
 
 ### Poll fallback — Fibonacci schedule with storage short-circuit
 
-The poll loop uses a Fibonacci-ish delay schedule (3s → 5s → 8s → 13s → 21s → 30s) and checks storage at the top of every iteration — before issuing a Daraja query. If a callback arrived while the loop was sleeping, polling exits immediately without making a redundant API call.
+The poll loop uses a Fibonacci backoff built from `pollIntervalMs` (default 5000 → 5s → 10s → 15s → 25s → 30s, capped at 30s) and checks storage at the top of every iteration — before issuing a Daraja query. If a callback arrived while the loop was sleeping, polling exits immediately without making a redundant API call.
 
 When the poll loop finds a terminal state, it uses the same CAS as the callback path. If a late-arriving callback and an active poll both resolve in the same window, one wins atomically and the other yields and re-reads the winner's state.
 

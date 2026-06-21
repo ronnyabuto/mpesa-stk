@@ -1,22 +1,28 @@
 import type { MpesaConfig, PaymentStatus, PaymentRecord, Logger, DarajaQueryResponse } from './types.js'
 import type { StorageAdapter } from './adapters/types.js'
-import { resultCodeToStatus } from './callback.js'
+import { terminalQueryStatus } from './callback.js'
 import { queryStkStatus } from './daraja.js'
 
 // ---------------------------------------------------------------------------
-// Fibonacci-ish poll schedule (ms), capped at 30 000
+// Poll schedule: a Fibonacci backoff built from config.pollIntervalMs.
+//
+// delay(attempt) = min(pollIntervalMs * FIB[attempt], MAX_POLL_DELAY_MS)
+//
+// The base interval is the first wait (give Daraja/the user a moment before the
+// first query); each subsequent gap grows so we don't hammer the STK Query
+// endpoint while a slow customer is still entering their PIN. At the default
+// 5 000 ms base this yields 5s → 10s → 15s → 25s → 30s → 30s …
 // ---------------------------------------------------------------------------
 
-const POLL_DELAYS_MS = [3000, 5000, 8000, 13000, 21000, 34000].map((d) =>
-  Math.min(d, 30000)
-)
+const DEFAULT_POLL_INTERVAL_MS = 5_000
+const MAX_POLL_DELAY_MS = 30_000
+const POLL_BACKOFF_MULTIPLIERS = [1, 2, 3, 5, 8, 13, 21]
 
-function getDelay(attempt: number): number {
-  // attempt is 0-indexed
-  if (attempt < POLL_DELAYS_MS.length) {
-    return POLL_DELAYS_MS[attempt] as number
-  }
-  return 30000
+function getDelay(attempt: number, pollIntervalMs: number): number {
+  // attempt is 0-indexed; clamp to the last multiplier once exhausted
+  const multiplier =
+    POLL_BACKOFF_MULTIPLIERS[Math.min(attempt, POLL_BACKOFF_MULTIPLIERS.length - 1)] as number
+  return Math.min(pollIntervalMs * multiplier, MAX_POLL_DELAY_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,11 +77,13 @@ export async function pollPaymentStatus(
 
   activePollIds.add(checkoutRequestId)
   const maxAttempts = config.maxPollAttempts ?? 10
+  const pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
 
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      // Wait before querying (first delay is 3s — give Daraja a moment)
-      await sleep(getDelay(attempt))
+      // Wait before querying — first delay is one base interval (give Daraja
+      // and the customer a moment), then a Fibonacci backoff. See getDelay.
+      await sleep(getDelay(attempt, pollIntervalMs))
 
       // Re-check storage — callback might have arrived while we were sleeping
       const current = await storage.getPaymentByCheckoutId(checkoutRequestId)
@@ -105,16 +113,20 @@ export async function pollPaymentStatus(
       }
 
       const resultCode = parseInt(queryResult.ResultCode, 10)
+      const status = terminalQueryStatus(resultCode)
 
-      // ResultCode "0" from the query means Daraja accepted the query request,
-      // but ResponseCode "0" + a still-pending state means the STK is still processing.
-      // We treat any non-zero ResultCode as a terminal state.
-      //
-      // Daraja quirk: during processing, both ResponseCode and ResultCode are "0"
-      // and ResultDesc says "The service request is processed successfully."
-      // In that ambiguous case we continue polling.
-      if (resultCode !== 0) {
-        const status = resultCodeToStatus(resultCode)
+      // Only a KNOWN-TERMINAL query code settles the payment. Everything else is
+      // not-yet-determinable and we keep polling:
+      //   - "0"    — still processing (both ResponseCode and ResultCode are "0"
+      //              and ResultDesc says "processed successfully" while the STK
+      //              is still awaiting the user)
+      //   - "4999" — undocumented transient code seen in the sandbox
+      //   - any unrecognised code, or NaN
+      // If the transaction never resolves we fall through to the maxPollAttempts
+      // path below and exit as TIMEOUT, which reconciliation then double-checks.
+      // This is the safe direction: a still-pending payment is never settled
+      // FAILED from an ambiguous query response.
+      if (status !== undefined) {
         const now = new Date()
 
         logger?.info('Poll found terminal status from STK Query', {

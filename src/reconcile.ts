@@ -7,16 +7,70 @@ import type {
   DarajaQueryResponse,
 } from './types.js'
 import type { StorageAdapter } from './adapters/types.js'
-import { resultCodeToStatus } from './callback.js'
-import { queryStkStatus } from './daraja.js'
+import { terminalQueryStatus } from './callback.js'
+import { queryStkStatus, DarajaRateLimitError } from './daraja.js'
 
-function queryStatusToPaymentStatus(response: DarajaQueryResponse): PaymentStatus {
+type ReconcileClassification =
+  | { kind: 'status'; status: PaymentStatus }
+  | { kind: 'indeterminate' }
+
+/**
+ * Classify a reconciliation query response into a definite Daraja status, or
+ * `indeterminate` when the response cannot be trusted to reflect a final state.
+ *
+ * Reconciliation queries a transaction long after initiation, so here a
+ * ResultCode of "0" means the transaction COMPLETED successfully (unlike during
+ * live polling, where "0" means "still processing"). Any code that is neither
+ * "0" nor a known-terminal code — e.g. the transient "4999", an unrecognised
+ * code, or a non-numeric value — is `indeterminate`: we cannot prove Daraja's
+ * state, so we skip rather than fabricate a terminal mismatch.
+ */
+function classifyQueryForReconcile(response: DarajaQueryResponse): ReconcileClassification {
   const resultCode = parseInt(response.ResultCode, 10)
-  if (isNaN(resultCode)) return 'FAILED'
+  if (Number.isNaN(resultCode)) return { kind: 'indeterminate' }
+  if (resultCode === 0) return { kind: 'status', status: 'SUCCESS' }
+  const terminal = terminalQueryStatus(resultCode)
+  if (terminal !== undefined) return { kind: 'status', status: terminal }
+  return { kind: 'indeterminate' }
+}
 
-  // ResultCode 0 from the query API means the transaction was processed successfully
-  if (resultCode === 0) return 'SUCCESS'
-  return resultCodeToStatus(resultCode)
+// Adaptive backoff for Daraja's Apigee SpikeArrest (HTTP 429) on the STK Query
+// endpoint. We retry the SAME payment with exponential backoff + jitter rather
+// than skipping it, honouring any Retry-After hint, so reconciliation
+// self-throttles to whatever the real (unpublished) production limit is instead
+// of relying on a hard-coded guess.
+const MAX_RATE_LIMIT_RETRIES = 5
+const RATE_LIMIT_BASE_DELAY_MS = 1_000
+const RATE_LIMIT_MAX_DELAY_MS = 30_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function queryWithRateLimitBackoff(
+  config: MpesaConfig,
+  checkoutRequestId: string,
+  timeoutMs: number,
+  logger?: Logger
+): Promise<DarajaQueryResponse> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await queryStkStatus(config, checkoutRequestId, timeoutMs)
+    } catch (err) {
+      if (err instanceof DarajaRateLimitError && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const expo = Math.min(RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt, RATE_LIMIT_MAX_DELAY_MS)
+        const waitMs = (err.retryAfterMs ?? expo) + Math.floor(Math.random() * 250)
+        logger?.warn('Reconciliation rate-limited by Daraja — backing off', {
+          checkoutRequestId,
+          attempt: attempt + 1,
+          waitMs,
+        })
+        await sleep(waitMs)
+        continue
+      }
+      throw err
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -67,36 +121,57 @@ export async function reconcile(
 
   const timeoutMs = config.timeoutMs ?? 75_000
 
+  const intervalMs = config.reconcileQueryIntervalMs ?? 100
+
   for (const payment of allPayments) {
     try {
-      const queryResult = await queryStkStatus(config, payment.checkoutRequestId, timeoutMs)
-      const mpesaStatus = queryStatusToPaymentStatus(queryResult)
+      const queryResult = await queryWithRateLimitBackoff(
+        config,
+        payment.checkoutRequestId,
+        timeoutMs,
+        logger
+      )
+      const classification = classifyQueryForReconcile(queryResult)
 
-      checked++
-
-      if (mpesaStatus === payment.status) {
-        matched++
-        logger?.info('Reconciliation: payment matches', {
-          paymentId: payment.id,
-          status: payment.status,
-        })
-      } else {
-        logger?.warn('Reconciliation: status mismatch found', {
-          paymentId: payment.id,
-          storedStatus: payment.status,
-          mpesaStatus,
-        })
-
-        mismatches.push({
+      if (classification.kind === 'indeterminate') {
+        // Daraja returned a transient/unrecognised code (e.g. "4999") — we can't
+        // prove the transaction's final state, so skip rather than report a
+        // false mismatch. Re-run reconciliation later to verify it.
+        skipped++
+        logger?.warn('Reconciliation: indeterminate query result — skipping', {
           paymentId: payment.id,
           checkoutRequestId: payment.checkoutRequestId,
-          storedStatus: payment.status,
-          mpesaStatus,
-          amount: payment.amount,
+          resultCode: queryResult.ResultCode,
         })
+      } else {
+        const mpesaStatus = classification.status
+        checked++
+
+        if (mpesaStatus === payment.status) {
+          matched++
+          logger?.info('Reconciliation: payment matches', {
+            paymentId: payment.id,
+            status: payment.status,
+          })
+        } else {
+          logger?.warn('Reconciliation: status mismatch found', {
+            paymentId: payment.id,
+            storedStatus: payment.status,
+            mpesaStatus,
+          })
+
+          mismatches.push({
+            paymentId: payment.id,
+            checkoutRequestId: payment.checkoutRequestId,
+            storedStatus: payment.status,
+            mpesaStatus,
+            amount: payment.amount,
+          })
+        }
       }
     } catch (err) {
-      // If Daraja query fails for one payment, log and skip — don't abort the whole reconciliation.
+      // Query failed even after rate-limit backoff (network error, persistent
+      // 429, etc.). Log and skip — don't abort the whole reconciliation.
       // Increment skipped (not checked) so callers know this payment was NOT verified.
       skipped++
       logger?.error('Reconciliation: failed to query payment — skipping', {
@@ -106,8 +181,13 @@ export async function reconcile(
       })
     }
 
-    // 100 ms between queries keeps us below Daraja's per-second rate limit (~15 req/s production)
-    await new Promise<void>((r) => setTimeout(r, 100))
+    // Politeness floor between queries. The STK Query endpoint is behind an
+    // Apigee SpikeArrest policy — observed in the sandbox (June 2026) as
+    // 5 requests / 60s, burst 1 (~1 req/12s). The production limit is not
+    // published, so rather than hard-coding a guess we keep a small floor here
+    // and let queryWithRateLimitBackoff() above self-throttle to the real limit
+    // when a 429 is returned. Override via config.reconcileQueryIntervalMs.
+    await sleep(intervalMs)
   }
 
   logger?.info('Reconciliation complete', {

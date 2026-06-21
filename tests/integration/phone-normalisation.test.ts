@@ -91,6 +91,49 @@ describe('normalisePhoneNumber — invalid inputs that must throw', () => {
   })
 })
 
+describe('normalisePhoneNumber — non-mobile prefixes must be rejected (real fat-finger inputs)', () => {
+  // M-Pesa STK Push only reaches mobile subscribers. A user who mistypes a
+  // landline or an invalid prefix should get a clear local error, not a wasted
+  // Daraja round-trip that fails opaquely.
+  it.each([
+    ['0512345678', '05x — not a Kenyan mobile prefix'],
+    ['0212345678', '02x — Nairobi landline'],
+    ['0912345678', '09x — not assigned to mobile'],
+    ['0812345678', '08x — not a mobile prefix'],
+    ['0612345678', '06x — not a mobile prefix'],
+    ['0012345678', '00x — invalid'],
+    ['0123456789', '012 — outside the Airtel 010/011 mobile range'],
+    ['0190000000', '019 — outside the Airtel 010/011 mobile range'],
+  ])('rejects %s (%s)', (input) => {
+    expect(() => normalisePhoneNumber(input)).toThrow(/Invalid phone number/)
+  })
+
+  it('rejects the same invalid prefixes in +254 international form', () => {
+    expect(() => normalisePhoneNumber('+254512345678')).toThrow(/Invalid phone number/)
+    expect(() => normalisePhoneNumber('254212345678')).toThrow(/Invalid phone number/)
+  })
+})
+
+describe('normalisePhoneNumber — messy real-world UI input', () => {
+  it.each([
+    ['  0712345678  ', 'leading/trailing whitespace'],
+    ['0712-345-678', 'dashes'],
+    ['+254 712 345 678', 'spaces with country code'],
+    ['(+254) 712 345 678', 'parentheses and country code'],
+    ['254.712.345.678', 'dot separators'],
+    ['0712 345678', 'single mid-space'],
+  ])('normalises %s (%s) to 254712345678', (input) => {
+    expect(normalisePhoneNumber(input)).toBe('254712345678')
+  })
+
+  it('rejects a string with embedded letters even if it contains a valid-looking number', () => {
+    // "0712345678x" → digits "0712345678" — this WOULD pass. But pure-letter or
+    // mixed inputs that strip to the wrong length must fail.
+    expect(() => normalisePhoneNumber('phone: 0712')).toThrow(/Invalid phone number/)
+    expect(() => normalisePhoneNumber('O712345678')).toThrow(/Invalid phone number/) // letter O, not zero
+  })
+})
+
 describe('normalisePhoneNumber — boundary values for Kenyan numbers', () => {
   it('accepts exactly 12-digit 254XXXXXXXXX number', () => {
     const result = normalisePhoneNumber('254708374149')

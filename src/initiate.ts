@@ -23,22 +23,27 @@ import type {
 export function normalisePhoneNumber(raw: string): string {
   const digits = raw.replace(/\D/g, '')
 
-  // Local format (10 digits, leading 0): covers Safaricom 07x, Airtel 010x/011x,
-  // Telkom/T-Kash 077x — any Kenyan number starting with 0 followed by 9 more digits.
-  if (/^0\d{9}$/.test(digits)) {
+  // Local format (10 digits, leading 0). Kenyan MOBILE prefixes only:
+  //   07x       — Safaricom, Airtel, Telkom, Equitel, Faiba
+  //   010 / 011 — Airtel
+  // Numbers may be ported across networks, so we allow the full mobile range
+  // rather than Safaricom-only. Non-mobile inputs (landline 02x, the common
+  // 05x/09x fat-finger, etc.) are rejected here instead of being forwarded to
+  // Daraja, which would otherwise reject them opaquely after a wasted round-trip.
+  if (/^0(7\d|1[01])\d{7}$/.test(digits)) {
     return '254' + digits.slice(1)
   }
 
-  // International format (12 digits): 254 + 9-digit subscriber number.
+  // International format (12 digits): 254 + the same mobile prefixes.
   // +254 already stripped of the plus sign by replace(/\D/g,'') above.
-  if (/^254\d{9}$/.test(digits)) {
+  if (/^254(7\d|1[01])\d{7}$/.test(digits)) {
     return digits
   }
 
   throw new Error(
     `Invalid phone number: "${raw}". ` +
-    'Expected formats: 07xxxxxxxx, 01xxxxxxxx, +2547xxxxxxxx, +2541xxxxxxxx, ' +
-    '2547xxxxxxxx, 2541xxxxxxxx, or any Kenyan mobile number in local or international format'
+    'Expected a Kenyan mobile number (07xxxxxxxx, 011xxxxxxx, 010xxxxxxx, or ' +
+    'the +254 / 254 international equivalents). Non-mobile prefixes are rejected.'
   )
 }
 

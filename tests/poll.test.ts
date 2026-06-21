@@ -105,9 +105,9 @@ describe('pollPaymentStatus', () => {
   it('callback arrives during poll sleep — poll detects SUCCESS on storage re-check without querying Daraja again', async () => {
     await adapter.createPayment(makeRecord())
 
-    // Poll will sleep 3 s on attempt 0. During that sleep we simulate the callback
-    // arriving by updating storage directly. The poll's re-check after the sleep
-    // should see SUCCESS and return without touching Daraja.
+    // Poll sleeps one base interval (default 5s) on attempt 0. During that sleep
+    // we simulate the callback arriving by updating storage directly. The poll's
+    // re-check after the sleep should see SUCCESS and return without touching Daraja.
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
 
@@ -117,8 +117,8 @@ describe('pollPaymentStatus', () => {
       adapter
     )
 
-    // Advance halfway through the first sleep — callback "arrives"
-    await vi.advanceTimersByTimeAsync(1500)
+    // Advance halfway through the first 5s sleep — callback "arrives"
+    await vi.advanceTimersByTimeAsync(2500)
     await adapter.settlePayment('pay-001', {
       status: 'SUCCESS',
       mpesaReceiptNumber: 'NLJ7RT61SV',
@@ -126,7 +126,7 @@ describe('pollPaymentStatus', () => {
     })
 
     // Advance past the rest of the first sleep so the poll re-checks storage
-    await vi.advanceTimersByTimeAsync(2000)
+    await vi.advanceTimersByTimeAsync(3000)
 
     const status = await pollPromise
 
@@ -226,8 +226,8 @@ describe('pollPaymentStatus', () => {
 
     // Start first poll (will block on the STK query fetch)
     const poll1 = pollPaymentStatus('ws_CO_011120241020363925', config, adapter)
-    // Let the token fetch complete and the first delay fire
-    await vi.advanceTimersByTimeAsync(3000)
+    // Let the first base interval (5s) elapse so the token fetch + STK query fire
+    await vi.advanceTimersByTimeAsync(5000)
 
     // Second poll should return immediately with PENDING (no Daraja query)
     const fetchCountBefore = fetchCallCount

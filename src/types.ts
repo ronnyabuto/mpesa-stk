@@ -17,10 +17,21 @@ export interface MpesaConfig {
   environment: Environment
   /** default 75000 (75s — M-Pesa's own timeout is 60s) */
   timeoutMs?: number
-  /** default 5000 */
+  /**
+   * Base interval (ms) for the poll fallback, default 5000. The poll waits one
+   * interval before its first STK Query, then applies a Fibonacci backoff
+   * (×1, 2, 3, 5, 8, 13, 21) capped at 30s — e.g. 5s → 10s → 15s → 25s → 30s.
+   */
   pollIntervalMs?: number
   /** default 10 */
   maxPollAttempts?: number
+  /**
+   * Politeness floor in ms between STK Query calls during reconciliation
+   * (default 100). The STK Query endpoint is rate-limited by an Apigee
+   * SpikeArrest policy; on HTTP 429 reconciliation additionally backs off
+   * adaptively (honouring Retry-After), so this is a floor, not the sole guard.
+   */
+  reconcileQueryIntervalMs?: number
 }
 
 export interface PaymentRecord {

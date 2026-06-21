@@ -39,6 +39,52 @@ export function resultCodeToStatus(code: number): PaymentStatus {
   }
 }
 
+/**
+ * Known TERMINAL result codes as returned by the STK *Query* endpoint.
+ *
+ * Why this is separate from `resultCodeToStatus`: a *callback* is delivered by
+ * Safaricom only once a transaction has reached a final state, so an unknown
+ * code there is safely treated as FAILED (the open default above). The STK
+ * *Query* endpoint is different — it is also queried while a transaction is
+ * still in flight, and it returns transient/in-progress codes for those:
+ *
+ *   - "0"    — "service request processed successfully" while still awaiting the
+ *              user's PIN (ambiguous in-progress signal during live polling)
+ *   - "4999" — undocumented transient code observed in the sandbox (June 2026)
+ *              when the query races ahead of settlement
+ *   - the "500.001.1001 — transaction is being processed" transport error
+ *
+ * Coercing any of those to FAILED would settle a still-pending payment as
+ * failed — the financially-dangerous direction (you may refund a payment that
+ * later succeeds). So the query path uses a CLOSED allowlist: only a code listed
+ * here is terminal. Any other code is "not yet determinable" and the caller must
+ * keep waiting (poll) or skip and re-check later (reconcile) rather than settle.
+ *
+ * ResultCode 0 is intentionally NOT in this table because its meaning is
+ * context-dependent (in-progress during polling vs. completed during a late
+ * reconciliation query) — each caller handles 0 explicitly.
+ */
+const TERMINAL_QUERY_STATUS: Readonly<Record<number, PaymentStatus>> = {
+  1:    'FAILED',    // insufficient balance
+  1001: 'FAILED',    // unable to lock subscriber — a previous transaction is in process
+  1019: 'EXPIRED',   // transaction expired
+  1025: 'FAILED',    // error while sending the STK push
+  1032: 'CANCELLED', // cancelled by user
+  1037: 'TIMEOUT',   // DS timeout — user could not be reached
+  2001: 'FAILED',    // wrong PIN / invalid initiator information
+  9999: 'FAILED',    // general error
+}
+
+/**
+ * Terminal status for a code returned by the STK *Query* endpoint, or
+ * `undefined` if the code is transient / in-flight / unrecognised. A caller that
+ * gets `undefined` MUST NOT settle the payment — poll keeps waiting, reconcile
+ * skips. See {@link TERMINAL_QUERY_STATUS}.
+ */
+export function terminalQueryStatus(code: number): PaymentStatus | undefined {
+  return TERMINAL_QUERY_STATUS[code]
+}
+
 // ---------------------------------------------------------------------------
 // Main callback processor
 // ---------------------------------------------------------------------------
